@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# SwiftPM
+.swiftpm/
+.build/
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# CocoaPods (not used by default, but safe to ignore if added)
+Pods/
+Podfile.lock
+
+# Carthage (not used by default, but safe to ignore if added)
+Carthage/Build/
+
+# Tuist / Mint / Other tools
+Mint/
+Tuist/.build/
+
+# Logs
+*.log
+
+# Temporary files
+*.swp
+*.swo
+
+# Xcode previews cache
+*.xcuserstate
