@@ -5,12 +5,15 @@ struct Shortcut: Codable, Equatable {
     var keyCode: UInt32      // Carbon/Quartz virtual key code
     var modifiers: NSEvent.ModifierFlags
 
+    // Single source of truth for allowed modifiers
+    private static let allowedModifierMask: NSEvent.ModifierFlags = [.command, .option, .control, .shift, .capsLock, .function]
+
     init(keyCode: UInt32, modifiers: NSEvent.ModifierFlags) {
         self.keyCode = keyCode
-        self.modifiers = modifiers.intersection([.command, .option, .control, .shift, .capsLock, .function])
+        self.modifiers = modifiers.intersection(Self.allowedModifierMask)
     }
 
-    // Custom Codable to handle NSEvent.ModifqierFlags (not Codable by default)
+    // Custom Codable to handle NSEvent.ModifierFlags (not Codable by default)
     private enum CodingKeys: String, CodingKey {
         case keyCode
         case modifiersRaw
@@ -20,9 +23,7 @@ struct Shortcut: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.keyCode = try c.decode(UInt32.self, forKey: .keyCode)
         let raw = try c.decode(UInt.self, forKey: .modifiersRaw)
-        self.modifiers = NSEvent.ModifierFlags(rawValue: raw)
-        // Normalize to allowed set (same as in designated init)
-        self.modifiers = self.modifiers.intersection([.command, .option, .control, .shift, .capsLock, .function])
+        self.modifiers = NSEvent.ModifierFlags(rawValue: raw).intersection(Self.allowedModifierMask)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -72,7 +73,6 @@ struct Shortcut: Codable, Equatable {
     static func keyString(for keyCode: UInt32) -> String? {
         // Function keys
         if (122...126).contains(Int(keyCode)) || keyCode == 96 || keyCode == 97 || keyCode == 98 || keyCode == 100 || keyCode == 109 || keyCode == 111 {
-            // Common Apple key codes: F1=122 ... F12=111
             if let fIdx = functionKeyIndex(from: keyCode) {
                 return "F\(fIdx)"
             }
@@ -93,8 +93,7 @@ struct Shortcut: Codable, Equatable {
             break
         }
 
-        // Try to map letters/numbers by using TIS/UCKey translation (optional).
-        // For simplicity, map common A-Z and 0-9 via US key codes.
+        // Basic US layout mapping
         if let s = usKeyLabel(for: keyCode) {
             return s.uppercased()
         }
@@ -102,7 +101,6 @@ struct Shortcut: Codable, Equatable {
     }
 
     private static func functionKeyIndex(from keyCode: UInt32) -> Int? {
-        // Mapping common mac key codes to F-keys
         let map: [UInt32: Int] = [
             122: 1, 120: 2, 99: 3, 118: 4, 96: 5, 97: 6, 98: 7, 100: 8, 101: 9, 109: 10, 103: 11, 111: 12
         ]
@@ -110,7 +108,6 @@ struct Shortcut: Codable, Equatable {
     }
 
     private static func usKeyLabel(for keyCode: UInt32) -> String? {
-        // Minimal mapping for letters/numbers on US layout
         let usMap: [UInt32: String] = [
             0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X", 8: "C", 9: "V",
             11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y", 17: "T", 18: "1", 19: "2",

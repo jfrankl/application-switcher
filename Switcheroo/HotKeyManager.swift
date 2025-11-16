@@ -8,33 +8,71 @@ enum HotKeyEvent {
 
 final class HotKeyManager {
     static let shared = HotKeyManager()
-    private init() {}
-
-    private var hotKeyRef: EventHotKeyRef?
-    private var handlerRef: EventHandlerRef?
-    private var callback: ((HotKeyEvent) -> Void)?
+    private init() {
+        installHandlerIfNeeded()
+    }
 
     // FourCC 'SWCH'
     private let signature: OSType = 0x53574348
 
-    func register(shortcut: Shortcut, callback: @escaping (HotKeyEvent) -> Void) {
-        unregister()
-        self.callback = callback
+    // Multiple hotkeys support
+    private var hotKeyRefs: [UInt32: EventHotKeyRef] = [:]              // id -> ref
+    private var callbacks: [UInt32: (HotKeyEvent) -> Void] = [:]        // id -> callback
+    private var handlerRef: EventHandlerRef?
 
-        var hotKeyID = EventHotKeyID(signature: signature, id: 1)
+    // Public: register or replace a hotkey for a given id
+    func register(id: UInt32, shortcut: Shortcut, callback: @escaping (HotKeyEvent) -> Void) {
+        // Unregister any existing hotkey with same id
+        unregister(id: id)
+
+        callbacks[id] = callback
+
+        var hotKeyID = EventHotKeyID(signature: signature, id: id)
 
         let mods = carbonFlags(from: shortcut.modifiers)
-        let status = RegisterEventHotKey(shortcut.keyCode, mods, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(shortcut.keyCode, mods, hotKeyID, GetEventDispatcherTarget(), 0, &ref)
         if status != noErr {
-            NSLog("RegisterEventHotKey failed: \(status)")
+            NSLog("RegisterEventHotKey failed for id \(id): \(status)")
+        } else if let ref {
+            hotKeyRefs[id] = ref
         }
+
+        installHandlerIfNeeded()
+    }
+
+    func unregister(id: UInt32) {
+        if let ref = hotKeyRefs[id] {
+            UnregisterEventHotKey(ref)
+            hotKeyRefs.removeValue(forKey: id)
+        }
+        callbacks.removeValue(forKey: id)
+    }
+
+    func unregisterAll() {
+        for (_, ref) in hotKeyRefs {
+            UnregisterEventHotKey(ref)
+        }
+        hotKeyRefs.removeAll()
+        callbacks.removeAll()
+
+        if let handlerRef {
+            RemoveEventHandler(handlerRef)
+            self.handlerRef = nil
+        }
+    }
+
+    deinit { unregisterAll() }
+
+    private func installHandlerIfNeeded() {
+        guard handlerRef == nil else { return }
 
         let eventTypes: [EventTypeSpec] = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
         ]
 
-        let installStatus: OSStatus = eventTypes.withUnsafeBufferPointer { buffer in
+        let status: OSStatus = eventTypes.withUnsafeBufferPointer { buffer in
             InstallEventHandler(
                 GetEventDispatcherTarget(),
                 hotKeyHandler,
@@ -44,37 +82,37 @@ final class HotKeyManager {
                 &handlerRef
             )
         }
-        if installStatus != noErr {
-            NSLog("Failed to install hotkey handler: \(installStatus)")
+        if status != noErr {
+            NSLog("Failed to install hotkey handler: \(status)")
         }
     }
-
-    func unregister() {
-        if let handlerRef {
-            RemoveEventHandler(handlerRef)
-            self.handlerRef = nil
-        }
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
-        callback = nil
-    }
-
-    deinit { unregister() }
 
     private let hotKeyHandler: EventHandlerUPP = { (_: EventHandlerCallRef?, event: EventRef?, userData: UnsafeMutableRawPointer?) -> OSStatus in
         guard let userData, let event else { return noErr }
         let me = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+
+        var hotKeyID = EventHotKeyID()
+        let status = GetEventParameter(event,
+                                       EventParamName(kEventParamDirectObject),
+                                       EventParamType(typeEventHotKeyID),
+                                       nil,
+                                       MemoryLayout<EventHotKeyID>.size,
+                                       nil,
+                                       &hotKeyID)
+        guard status == noErr else { return noErr }
+
+        let id = hotKeyID.id
         let kind = GetEventKind(event)
 
-        switch kind {
-        case UInt32(kEventHotKeyPressed):
-            me.callback?(.pressed)
-        case UInt32(kEventHotKeyReleased):
-            me.callback?(.released)
-        default:
-            break
+        if let cb = me.callbacks[id] {
+            switch kind {
+            case UInt32(kEventHotKeyPressed):
+                cb(.pressed)
+            case UInt32(kEventHotKeyReleased):
+                cb(.released)
+            default:
+                break
+            }
         }
         return noErr
     }
