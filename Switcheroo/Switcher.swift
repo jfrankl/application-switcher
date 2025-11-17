@@ -49,9 +49,14 @@ final class Switcher: ObservableObject {
 
     private var overlayOriginApp: NSRunningApplication?
 
-    // NEW: overlay activation observer to auto-close when focus changes
+    // For overlay auto-close when focus changes
     private var overlayActivationObserver: Any?
 
+    // Window Switcher: fixed stacks per frontmost app
+    private var windowCycleStackByPID: [pid_t: [AppWindow]] = [:]
+    private var windowCycleIndexByPID: [pid_t: Int] = [:]
+
+    // Legacy state not used by fixed stacks
     private var windowCycleLastStableIDByPID: [pid_t: Int] = [:]
     private var windowCycleLastIndexByPID: [pid_t: Int] = [:]
 
@@ -77,6 +82,8 @@ final class Switcher: ObservableObject {
             guard let self else { return }
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             self.recordActivation(app)
+            // Reset Window Switcher stacks when user switches apps
+            self.resetWindowCycleStacks(exceptPID: app.processIdentifier)
         }
 
         seedMRU()
@@ -429,7 +436,7 @@ final class Switcher: ObservableObject {
         }
     }
 
-    // NEW: observe app activation while overlay visible
+    // Observe app activation while overlay visible
     private func installOverlayActivationObserver() {
         removeOverlayActivationObserver()
 
@@ -443,7 +450,6 @@ final class Switcher: ObservableObject {
             guard let activated = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
 
             let myPID = ProcessInfo.processInfo.processIdentifier
-            // If the activated app is not us, the user focused a different app: close the overlay.
             if activated.processIdentifier != myPID {
                 self.hideOverlayAndCleanup(reactivateOrigin: false)
             }
@@ -622,18 +628,26 @@ final class Switcher: ObservableObject {
         return true
     }
 
-    // MARK: - Window cycling
+    // MARK: - Window cycling (fixed stack per activation, reset on count change)
 
-    private func focusedWindowNumber(for app: NSRunningApplication) -> Int? {
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        var focusedWindowValue: CFTypeRef?
-        let err = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindowValue)
-        guard err == .success, let focusedWindow = focusedWindowValue else { return nil }
+    private func resetWindowCycleStacks(exceptPID pid: pid_t) {
+        // Keep the current app’s stack (optional), clear others to avoid growth.
+        windowCycleStackByPID = windowCycleStackByPID.filter { $0.key == pid }
+        windowCycleIndexByPID = windowCycleIndexByPID.filter { $0.key == pid }
+        windowCycleLastStableIDByPID.removeAll()
+        windowCycleLastIndexByPID.removeAll()
+    }
 
-        var numValue: CFTypeRef?
-        let numErr = AXUIElementCopyAttributeValue(focusedWindow as! AXUIElement, "AXWindowNumber" as CFString, &numValue)
-        if numErr == .success, let n = numValue as? Int { return n }
-        return nil
+    private func captureWindowStack(for app: NSRunningApplication) -> [AppWindow] {
+        let windows = WindowEnumerator.windows(for: app)
+        return windows
+    }
+
+    // Validate an AX element by probing a lightweight attribute
+    private func isAXElementValid(_ element: AXUIElement) -> Bool {
+        var value: AnyObject?
+        let err = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value)
+        return err == .success
     }
 
     private func togglePreviousWindowInFrontmostApp() {
@@ -641,50 +655,73 @@ final class Switcher: ObservableObject {
             NSLog("[Cycle] No frontmost application.")
             return
         }
-        let windows = WindowEnumerator.windows(for: frontApp)
-        NSLog("[Cycle] Front app: \(frontApp.localizedName ?? frontApp.bundleIdentifier ?? "App") windows=\(windows.map { "\($0.windowNumber):\($0.title ?? "")" })")
-        guard !windows.isEmpty else {
-            NSLog("[Cycle] No windows to cycle.")
-            return
-        }
-
         let pid = frontApp.processIdentifier
 
-        if let lastIndex = windowCycleLastIndexByPID[pid], windows.indices.contains(lastIndex) {
-            let nextIndex = (lastIndex + 1) % windows.count
-            let target = windows[nextIndex]
-            NSLog("[Cycle] (lastIndex) -> Activating windowNumber=\(target.windowNumber) title=\(target.title ?? "")")
-            WindowEnumerator.activate(window: target)
-            if let app = NSRunningApplication(processIdentifier: pid) {
-                _ = app.activate(options: [.activateAllWindows])
+        // Get current live windows to detect count changes.
+        let liveWindows = captureWindowStack(for: frontApp)
+
+        // If we have no cached stack for this PID, or the count changed, rebuild.
+        let cachedCount = windowCycleStackByPID[pid]?.count
+        if windowCycleStackByPID[pid] == nil || cachedCount != liveWindows.count {
+            if liveWindows.isEmpty {
+                NSLog("[Cycle] No windows to cycle.")
+                // Clear caches for this PID
+                windowCycleStackByPID[pid] = nil
+                windowCycleIndexByPID[pid] = nil
+                return
             }
-            windowCycleLastStableIDByPID[pid] = target.stableID
-            windowCycleLastIndexByPID[pid] = nextIndex
+            windowCycleStackByPID[pid] = liveWindows
+            // First press should go to the second window if available.
+            if liveWindows.count >= 2 {
+                // Set to 0 so advancing selects index 1 on first press
+                windowCycleIndexByPID[pid] = 0
+            } else {
+                // Only one window; advancing will wrap to 0
+                windowCycleIndexByPID[pid] = -1
+            }
+            NSLog("[Cycle] (Re)captured \(liveWindows.count) windows for PID \(pid) due to count change or first use.")
+        }
+
+        guard var stack = windowCycleStackByPID[pid], !stack.isEmpty else {
+            NSLog("[Cycle] Stack empty for PID \(pid).")
             return
         }
 
-        let focusedNumber = focusedWindowNumber(for: frontApp)
-        let anchorIndex: Int = {
-            if let lastStable = windowCycleLastStableIDByPID[pid],
-               let idx = windows.firstIndex(where: { $0.stableID == lastStable }) {
-                return idx
-            }
-            if let fnum = focusedNumber,
-               let idx = windows.firstIndex(where: { $0.windowNumber == fnum }) {
-                return idx
-            }
-            return 0
+        // Advance index with wrap-around
+        var nextIndex: Int = {
+            let current = windowCycleIndexByPID[pid] ?? -1
+            return (current + 1) % stack.count
         }()
 
-        let nextIndex = (anchorIndex + 1) % windows.count
-        let target = windows[nextIndex]
-        NSLog("[Cycle] (anchor) -> Activating windowNumber=\(target.windowNumber) title=\(target.title ?? "")")
+        // Prune closed/invalid windows on the fly
+        var safety = 0
+        while safety < 2 * max(stack.count, 1) {
+            let candidate = stack[nextIndex]
+            if isAXElementValid(candidate.axElement) {
+                break
+            } else {
+                // Remove invalid window and adjust index
+                stack.remove(at: nextIndex)
+                windowCycleStackByPID[pid] = stack
+                if stack.isEmpty {
+                    windowCycleIndexByPID[pid] = -1
+                    NSLog("[Cycle] All windows gone for PID \(pid).")
+                    return
+                }
+                nextIndex = nextIndex % stack.count
+            }
+            safety += 1
+        }
+
+        // Activate and store index
+        let target = stack[nextIndex]
+        windowCycleIndexByPID[pid] = nextIndex
+
+        NSLog("[Cycle] Activating windowNumber=\(target.windowNumber) index=\(nextIndex) of \(stack.count)")
         WindowEnumerator.activate(window: target)
         if let app = NSRunningApplication(processIdentifier: pid) {
             _ = app.activate(options: [.activateAllWindows])
         }
-        windowCycleLastStableIDByPID[pid] = target.stableID
-        windowCycleLastIndexByPID[pid] = nextIndex
     }
 
     // MARK: - Notifications
