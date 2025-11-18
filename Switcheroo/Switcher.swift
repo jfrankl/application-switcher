@@ -11,6 +11,15 @@ final class Switcher: ObservableObject {
         self.windowCycleShortcut = Self.loadWindowCycleShortcut()
         self.overlaySelectShortcut = Self.loadOverlaySelectShortcut()
         self.overlayQuitShortcut = Self.loadOverlayQuitShortcut()
+
+        self.separateKeySwitchEnabled = UserDefaults.standard.object(forKey: Self.separateModeDefaultsKey) as? Bool ?? false
+        self.separateToggleShortcut = Self.loadSeparateToggleShortcut()
+        self.separateOverlayShortcut = Self.loadSeparateOverlayShortcut()
+
+        HotKeyManager.shared.shouldDeliverCallback = { [weak self] in
+            guard let self else { return true }
+            return !self.hotkeysSuspended
+        }
     }
 
     @Published var backgroundColor: Color = Color(NSColor.windowBackgroundColor)
@@ -24,6 +33,45 @@ final class Switcher: ObservableObject {
 
     @Published private(set) var autoSelectSingleResult: Bool
     private static let autoSelectDefaultsKey = "AutoSelectSingleResult"
+
+    @Published private(set) var separateKeySwitchEnabled: Bool
+    private static let separateModeDefaultsKey = "SeparateKeySwitchEnabled"
+
+    @Published private(set) var separateToggleShortcut: Shortcut
+    @Published private(set) var separateOverlayShortcut: Shortcut
+
+    @Published private(set) var hotkeysSuspended: Bool = false
+
+    private static let separateToggleDefaultsKey = "SeparateToggleShortcut"
+    private static let separateOverlayDefaultsKey = "SeparateOverlayShortcut"
+
+    private static func loadSeparateToggleShortcut() -> Shortcut {
+        if let data = UserDefaults.standard.data(forKey: separateToggleDefaultsKey),
+           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
+            return s
+        }
+        return Shortcut(keyCode: 111, modifiers: []) // F12
+    }
+
+    private static func saveSeparateToggleShortcut(_ s: Shortcut) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: separateToggleDefaultsKey)
+        }
+    }
+
+    private static func loadSeparateOverlayShortcut() -> Shortcut {
+        if let data = UserDefaults.standard.data(forKey: separateOverlayDefaultsKey),
+           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
+            return s
+        }
+        return Shortcut(keyCode: 103, modifiers: []) // F11
+    }
+
+    private static func saveSeparateOverlayShortcut(_ s: Shortcut) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: separateOverlayDefaultsKey)
+        }
+    }
 
     private var pressStart: Date?
     private var longPressTimer: DispatchSourceTimer?
@@ -49,28 +97,28 @@ final class Switcher: ObservableObject {
 
     private var overlayOriginApp: NSRunningApplication?
 
-    // For overlay auto-close when focus changes
     private var overlayActivationObserver: Any?
 
-    // Window Switcher: fixed stacks per frontmost app
     private var windowCycleStackByPID: [pid_t: [AppWindow]] = [:]
     private var windowCycleIndexByPID: [pid_t: Int] = [:]
 
-    // Legacy state not used by fixed stacks
     private var windowCycleLastStableIDByPID: [pid_t: Int] = [:]
     private var windowCycleLastIndexByPID: [pid_t: Int] = [:]
 
     private enum HotKeyID: UInt32 {
         case appSwitch = 1
         case windowCycle = 2
+        case separateToggle = 3
+        case separateOverlay = 4
     }
 
     func start() {
         requestNotificationAuthorization()
 
         shortcut = Shortcut.load()
-        applyAppSwitchShortcut(shortcut)
-        applyWindowCycleShortcut(windowCycleShortcut)
+
+        registerAllHotkeysForCurrentMode()
+
         Self.saveOverlaySelectShortcut(overlaySelectShortcut)
         Self.saveOverlayQuitShortcut(overlayQuitShortcut)
 
@@ -82,28 +130,74 @@ final class Switcher: ObservableObject {
             guard let self else { return }
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             self.recordActivation(app)
-            // Reset Window Switcher stacks when user switches apps
             self.resetWindowCycleStacks(exceptPID: app.processIdentifier)
         }
+
+        NotificationCenter.default.addObserver(self, selector: #selector(onSuspendHotkeys), name: Notification.Name("SwitcherooSuspendHotkeys"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(onResumeHotkeys), name: Notification.Name("SwitcherooResumeHotkeys"), object: nil)
+
+        // New: fully disable global hotkeys while any picker is recording so the keystroke reaches the field
+        NotificationCenter.default.addObserver(self, selector: #selector(beginShortcutRecording), name: Notification.Name("SwitcherooBeginShortcutRecording"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(endShortcutRecording), name: Notification.Name("SwitcherooEndShortcutRecording"), object: nil)
 
         seedMRU()
     }
 
-    func applyAppSwitchShortcut(_ shortcut: Shortcut) {
-        self.shortcut = shortcut
-        HotKeyManager.shared.register(id: HotKeyID.appSwitch.rawValue, shortcut: shortcut) { [weak self] event in
-            switch event {
-            case .pressed: self?.onHotkeyPressed()
-            case .released: self?.onHotkeyReleased()
-            }
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func beginShortcutRecording() {
+        hotkeysSuspended = true
+        HotKeyManager.shared.unregisterAll()
+    }
+
+    @objc private func endShortcutRecording() {
+        hotkeysSuspended = false
+        registerAllHotkeysForCurrentMode()
+    }
+
+    // Only allow callbacks from hotkeys that are active for the current mode.
+    private func isHotKeyActive(id: UInt32) -> Bool {
+        guard let hk = HotKeyID(rawValue: id) else { return false }
+        switch hk {
+        case .windowCycle:
+            // Always active
+            return true
+        case .appSwitch:
+            // Only in combined mode
+            return !separateKeySwitchEnabled
+        case .separateToggle, .separateOverlay:
+            // Only in separate mode
+            return separateKeySwitchEnabled
         }
     }
 
-    func applyWindowCycleShortcut(_ shortcut: Shortcut) {
-        windowCycleShortcut = shortcut
-        Self.saveWindowCycleShortcut(shortcut)
-        HotKeyManager.shared.register(id: HotKeyID.windowCycle.rawValue, shortcut: shortcut) { [weak self] event in
-            guard let self else { return }
+    // Centralized registration so duplicates are preserved and only active IDs act
+    private func registerAllHotkeysForCurrentMode() {
+        HotKeyManager.shared.unregisterAll()
+
+        if separateKeySwitchEnabled {
+            HotKeyManager.shared.register(id: HotKeyID.separateToggle.rawValue, shortcut: separateToggleShortcut) { [weak self] event in
+                guard let self, self.isHotKeyActive(id: HotKeyID.separateToggle.rawValue) else { return }
+                if case .pressed = event { self.onSeparateToggleTap() }
+            }
+            HotKeyManager.shared.register(id: HotKeyID.separateOverlay.rawValue, shortcut: separateOverlayShortcut) { [weak self] event in
+                guard let self, self.isHotKeyActive(id: HotKeyID.separateOverlay.rawValue) else { return }
+                if case .pressed = event { self.onSeparateOverlayTap() }
+            }
+        } else {
+            HotKeyManager.shared.register(id: HotKeyID.appSwitch.rawValue, shortcut: shortcut) { [weak self] event in
+                guard let self, self.isHotKeyActive(id: HotKeyID.appSwitch.rawValue) else { return }
+                switch event {
+                case .pressed: self.onHotkeyPressed()
+                case .released: self.onHotkeyReleased()
+                }
+            }
+        }
+
+        HotKeyManager.shared.register(id: HotKeyID.windowCycle.rawValue, shortcut: windowCycleShortcut) { [weak self] event in
+            guard let self, self.isHotKeyActive(id: HotKeyID.windowCycle.rawValue) else { return }
             switch event {
             case .pressed:
                 self.postWindowCycleNotification()
@@ -112,6 +206,48 @@ final class Switcher: ObservableObject {
                 break
             }
         }
+    }
+
+    // Suspension control
+    func suspendHotkeys() { hotkeysSuspended = true }
+    func resumeHotkeys() { hotkeysSuspended = false }
+    @objc private func onSuspendHotkeys() { suspendHotkeys() }
+    @objc private func onResumeHotkeys() { resumeHotkeys() }
+
+    // MARK: - Mode switching API
+
+    func setSeparateKeySwitchEnabled(_ enabled: Bool) {
+        guard enabled != separateKeySwitchEnabled else { return }
+        separateKeySwitchEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.separateModeDefaultsKey)
+        registerAllHotkeysForCurrentMode()
+    }
+
+    private func registerSeparateModeHotkeys() {
+        registerAllHotkeysForCurrentMode()
+    }
+
+    func applySeparateToggleShortcut(_ s: Shortcut) {
+        separateToggleShortcut = s
+        Self.saveSeparateToggleShortcut(s)
+        if separateKeySwitchEnabled { registerAllHotkeysForCurrentMode() }
+    }
+
+    func applySeparateOverlayShortcut(_ s: Shortcut) {
+        separateOverlayShortcut = s
+        Self.saveSeparateOverlayShortcut(s)
+        if separateKeySwitchEnabled { registerAllHotkeysForCurrentMode() }
+    }
+
+    func applyAppSwitchShortcut(_ shortcut: Shortcut) {
+        self.shortcut = shortcut
+        if !separateKeySwitchEnabled { registerAllHotkeysForCurrentMode() }
+    }
+
+    func applyWindowCycleShortcut(_ shortcut: Shortcut) {
+        windowCycleShortcut = shortcut
+        Self.saveWindowCycleShortcut(shortcut)
+        registerAllHotkeysForCurrentMode()
     }
 
     func applyOverlaySelectShortcut(_ s: Shortcut) {
@@ -130,7 +266,7 @@ final class Switcher: ObservableObject {
         longPressThreshold = clamped
         UserDefaults.standard.set(clamped, forKey: Self.longPressDefaultsKey)
 
-        if pressStart != nil {
+        if pressStart != nil && !separateKeySwitchEnabled {
             rescheduleLongPressTimer()
         }
     }
@@ -198,7 +334,7 @@ final class Switcher: ObservableObject {
         return defaultOverlayQuit
     }
 
-    private static func saveOverlayQuitShortcut(_ s: Shortcut) {
+    private static func saveOverlayQuitShortcut(_ s: Shortcut) -> Void {
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: overlayQuitDefaultsKey)
         }
@@ -208,7 +344,10 @@ final class Switcher: ObservableObject {
         overlayEventMonitor != nil || overlayGlobalEventMonitor != nil
     }
 
+    // MARK: - Combined mode (press/hold)
+
     private func onHotkeyPressed() {
+        guard !separateKeySwitchEnabled else { return }
         if overlayIsVisible() {
             actionConsumedForThisPress = false
             pressStart = Date()
@@ -256,6 +395,7 @@ final class Switcher: ObservableObject {
     }
 
     private func onHotkeyReleased() {
+        guard !separateKeySwitchEnabled else { return }
         let elapsed = pressStart.map { Date().timeIntervalSince($0) } ?? 0
         cancelLongPressTimer()
         pressStart = nil
@@ -281,6 +421,20 @@ final class Switcher: ObservableObject {
     private func cancelLongPressTimer() {
         longPressTimer?.cancel()
         longPressTimer = nil
+    }
+
+    // MARK: - Separate mode tap handlers
+
+    private func onSeparateToggleTap() {
+        restorePreviousApp()
+    }
+
+    private func onSeparateOverlayTap() {
+        if overlayIsVisible() {
+            moveSelection(delta: 1)
+        } else {
+            enterOverlayMode()
+        }
     }
 
     private func hideOverlayAndCleanup(reactivateOrigin: Bool) {
@@ -436,7 +590,6 @@ final class Switcher: ObservableObject {
         }
     }
 
-    // Observe app activation while overlay visible
     private func installOverlayActivationObserver() {
         removeOverlayActivationObserver()
 
@@ -631,7 +784,6 @@ final class Switcher: ObservableObject {
     // MARK: - Window cycling (fixed stack per activation, reset on count change)
 
     private func resetWindowCycleStacks(exceptPID pid: pid_t) {
-        // Keep the current app’s stack (optional), clear others to avoid growth.
         windowCycleStackByPID = windowCycleStackByPID.filter { $0.key == pid }
         windowCycleIndexByPID = windowCycleIndexByPID.filter { $0.key == pid }
         windowCycleLastStableIDByPID.removeAll()
@@ -643,7 +795,6 @@ final class Switcher: ObservableObject {
         return windows
     }
 
-    // Validate an AX element by probing a lightweight attribute
     private func isAXElementValid(_ element: AXUIElement) -> Bool {
         var value: AnyObject?
         let err = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value)
@@ -656,27 +807,19 @@ final class Switcher: ObservableObject {
             return
         }
         let pid = frontApp.processIdentifier
-
-        // Get current live windows to detect count changes.
         let liveWindows = captureWindowStack(for: frontApp)
-
-        // If we have no cached stack for this PID, or the count changed, rebuild.
         let cachedCount = windowCycleStackByPID[pid]?.count
         if windowCycleStackByPID[pid] == nil || cachedCount != liveWindows.count {
             if liveWindows.isEmpty {
                 NSLog("[Cycle] No windows to cycle.")
-                // Clear caches for this PID
                 windowCycleStackByPID[pid] = nil
                 windowCycleIndexByPID[pid] = nil
                 return
             }
             windowCycleStackByPID[pid] = liveWindows
-            // First press should go to the second window if available.
             if liveWindows.count >= 2 {
-                // Set to 0 so advancing selects index 1 on first press
                 windowCycleIndexByPID[pid] = 0
             } else {
-                // Only one window; advancing will wrap to 0
                 windowCycleIndexByPID[pid] = -1
             }
             NSLog("[Cycle] (Re)captured \(liveWindows.count) windows for PID \(pid) due to count change or first use.")
@@ -687,20 +830,17 @@ final class Switcher: ObservableObject {
             return
         }
 
-        // Advance index with wrap-around
         var nextIndex: Int = {
             let current = windowCycleIndexByPID[pid] ?? -1
             return (current + 1) % stack.count
         }()
 
-        // Prune closed/invalid windows on the fly
         var safety = 0
         while safety < 2 * max(stack.count, 1) {
             let candidate = stack[nextIndex]
             if isAXElementValid(candidate.axElement) {
                 break
             } else {
-                // Remove invalid window and adjust index
                 stack.remove(at: nextIndex)
                 windowCycleStackByPID[pid] = stack
                 if stack.isEmpty {
@@ -713,7 +853,6 @@ final class Switcher: ObservableObject {
             safety += 1
         }
 
-        // Activate and store index
         let target = stack[nextIndex]
         windowCycleIndexByPID[pid] = nextIndex
 

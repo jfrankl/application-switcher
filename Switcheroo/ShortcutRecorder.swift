@@ -1,171 +1,310 @@
 import SwiftUI
 import AppKit
+import Combine
 
-// MARK: - Public SwiftUI control
-struct ShortcutPicker: View {
-    @Binding var shortcut: Shortcut
-    @State private var isRecording = false
-    @State private var pending: Shortcut?
-    @FocusState private var focused: Bool
+// MARK: - Recording coordination
 
-    var body: some View {
-        ZStack {
-            if isRecording {
-                HStack(spacing: 6) {
-                    ShortcutRecorderRepresentable(
-                        current: pending ?? shortcut,
-                        isRecording: true,
-                        onCommit: { new in
-                            shortcut = new
-                            isRecording = false
-                            pending = nil
-                        },
-                        onCancel: {
-                            pending = nil
-                            isRecording = false
-                        },
-                        onLiveUpdate: { live in
-                            pending = live
-                        }
-                    )
-                    .focused($focused)
-                    .frame(height: 24)
+@MainActor
+private final class RecordingCoordinator: ObservableObject {
+    static let shared = RecordingCoordinator()
 
-                    Button {
-                        pending = nil
-                        isRecording = false
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .buttonStyle(.borderless)
-                    .keyboardShortcut(.cancelAction)
-                    .help("Cancel")
-                }
-                .onAppear { focused = true }
-            } else {
-                Button {
-                    pending = nil
-                    isRecording = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Text(displayText(for: shortcut))
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(minWidth: 120, alignment: .center)
-                    }
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 10)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
+    // Track the currently active picker by its UUID
+    private var activeID: UUID?
+
+    // Ask to begin recording for a picker. If another is active, cancel it first.
+    func begin(for picker: ShortcutPickerHandle) {
+        if let current = activeID, current != picker.recorderID {
+            // Tell the previous picker to cancel and revert
+            NotificationCenter.default.post(name: .switcherooCancelOtherPicker, object: current)
+        }
+        activeID = picker.recorderID
+        NotificationCenter.default.post(name: .switcherooBeginShortcutRecording, object: nil)
+    }
+
+    // End recording for picker if it is the active one.
+    func end(for picker: ShortcutPickerHandle) {
+        if activeID == picker.recorderID {
+            activeID = nil
+            NotificationCenter.default.post(name: .switcherooEndShortcutRecording, object: nil)
         }
     }
 
-    private func displayText(for s: Shortcut) -> String {
-        let str = s.displayString.trimmingCharacters(in: .whitespacesAndNewlines)
-        return str.isEmpty ? "Set Shortcut…" : str
+    // If a picker is going away while active, ensure we end the global state.
+    func pickerDeinit(_ picker: ShortcutPickerHandle) {
+        if activeID == picker.recorderID {
+            activeID = nil
+            NotificationCenter.default.post(name: .switcherooEndShortcutRecording, object: nil)
+        }
     }
 }
 
-// MARK: - NSViewRepresentable wrapper
+// A protocol implemented by ShortcutPicker so the coordinator can cancel/revert.
+private protocol ShortcutPickerHandle {
+    var recorderID: UUID { get }
+    func cancelRecordingAndRevert()
+}
 
-struct ShortcutRecorderRepresentable: NSViewRepresentable {
-    let current: Shortcut
-    let isRecording: Bool
-    let onCommit: (Shortcut) -> Void
-    let onCancel: () -> Void
-    let onLiveUpdate: (Shortcut) -> Void
+// MARK: - Public SwiftUI control styled like the screenshot
+struct ShortcutPicker: View, ShortcutPickerHandle {
+    @Binding var shortcut: Shortcut
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
+    // UI state
+    @State private var isRecording = false
+    @State private var liveModifiers: NSEvent.ModifierFlags = []
+
+    // To revert on forced cancel
+    @State private var snapshotBeforeRecording: Shortcut?
+
+    // Hover/focus for styling
+    @State private var hovered = false
+    @FocusState private var focused: Bool
+
+    // Make the ID stable across view re-instantiations
+    @State private var _recorderID = UUID()
+    private let coordinator = RecordingCoordinator.shared
+
+    // Conformance: expose recorderID with proper access level
+    fileprivate var recorderID: UUID { _recorderID }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Capsule button area
+            Button {
+                beginRecording()
+            } label: {
+                HStack(spacing: 6) {
+                    Text(displayText())
+                        .font(.system(size: 13, weight: .semibold, design: .default))
+                        .monospacedDigit()
+                        .foregroundStyle(foregroundColor)
+                        .frame(minWidth: 120, alignment: .center)
+                        .contentTransition(.opacity)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(capsuleBackground)
+                .overlay(capsuleStroke)
+            }
+            .buttonStyle(.plain)
+            .focusable(true)
+            .focused($focused)
+            .onHover { hovered = $0 }
+            .accessibilityLabel("Shortcut")
+
+            // Clear button
+            Button {
+                clearShortcut()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(
+                        Circle()
+                            .fill(Color(NSColor.controlAccentColor))
+                            .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 1))
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Clear")
+            .opacity(hasShortcut ? 1 : 0.35)
+            .disabled(!hasShortcut)
+        }
+        .background(RecorderEventCatcher(
+            isRecording: $isRecording,
+            onCommit: { new in
+                shortcut = new
+                // Broadcast the committed shortcut so other pickers can clear if duplicate
+                NotificationCenter.default.post(name: .switcherooShortcutCommitted, object: nil, userInfo: [
+                    "shortcut": new,
+                    "senderID": recorderID
+                ])
+                endRecording()
+            },
+            onCancel: {
+                // Revert to snapshot if user cancels
+                if let snap = snapshotBeforeRecording {
+                    shortcut = snap
+                }
+                endRecording()
+            }
+        ))
+        .onReceive(NotificationCenter.default.publisher(for: .switcherooCancelOtherPicker)) { note in
+            guard let previousID = note.object as? UUID else { return }
+            // If someone else started recording and we were the previous, cancel & revert.
+            if previousID == self.recorderID {
+                cancelRecordingAndRevert()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .switcherooShortcutCommitted)) { note in
+            guard
+                let info = note.userInfo,
+                let committed = info["shortcut"] as? Shortcut,
+                let sender = info["senderID"] as? UUID
+            else { return }
+            // If another picker (different ID) committed the same shortcut, clear ours.
+            if sender != self.recorderID, self.shortcutsEqual(committed, self.shortcut), self.hasShortcut {
+                self.shortcut = self.noneShortcut
+            }
+        }
+        .onDisappear {
+            coordinator.pickerDeinit(self)
+        }
     }
 
-    func makeNSView(context: Context) -> RecorderField {
-        let v = RecorderField()
-        v.coordinator = context.coordinator
-        v.stringValue = current.displayString
-        v.placeholderString = "Press keys…"
+    // MARK: - ShortcutPickerHandle
+
+    func cancelRecordingAndRevert() {
+        if isRecording {
+            if let snap = snapshotBeforeRecording {
+                shortcut = snap
+            }
+            endRecording()
+        }
+    }
+
+    // MARK: - State helpers
+
+    // Treat keyCode==0 and empty modifiers as "no shortcut"
+    private var noneShortcut: Shortcut { Shortcut(keyCode: 0, modifiers: []) }
+
+    private func isNone(_ s: Shortcut) -> Bool {
+        s.keyCode == 0 && s.modifiers.isEmpty
+    }
+
+    private func shortcutsEqual(_ a: Shortcut, _ b: Shortcut) -> Bool {
+        a.keyCode == b.keyCode && a.modifiers == b.modifiers
+    }
+
+    private var hasShortcut: Bool {
+        !isNone(shortcut)
+    }
+
+    private func clearShortcut() {
+        shortcut = noneShortcut
+    }
+
+    private func beginRecording() {
+        guard !isRecording else { return }
+        snapshotBeforeRecording = shortcut
+        isRecording = true
+        focused = true
+        coordinator.begin(for: self)
+    }
+
+    private func endRecording() {
+        guard isRecording else { return }
+        isRecording = false
+        focused = false
+        liveModifiers = []
+        // Ensure end notification is posted immediately
+        coordinator.end(for: self)
+    }
+
+    // MARK: - Styling
+
+    private var isBlueFocused: Bool { isRecording }
+
+    private var capsuleBackground: some View {
+        Capsule(style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: isBlueFocused
+                        ? [Color(NSColor.controlAccentColor).opacity(0.95),
+                           Color(NSColor.controlAccentColor)]
+                        : [
+                            Color(nsColor: .windowBackgroundColor).opacity(0.55),
+                            Color(nsColor: .windowBackgroundColor).opacity(0.75)
+                          ],
+                    startPoint: .top, endPoint: .bottom
+                )
+            )
+            .shadow(color: Color.black.opacity(hovered || isBlueFocused ? 0.28 : 0.18),
+                    radius: hovered || isBlueFocused ? 10 : 6, x: 0, y: 1)
+    }
+
+    private var capsuleStroke: some View {
+        Capsule(style: .continuous)
+            .stroke(isBlueFocused ? Color.white.opacity(0.35) : Color.white.opacity(0.12), lineWidth: 1)
+    }
+
+    private var foregroundColor: Color { isBlueFocused ? .white : .primary }
+
+    private func displayText() -> String {
+        if isRecording { return "•••" }
+        if isNone(shortcut) { return " " } // blank display for no shortcut
+        let s = shortcut.displayString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? " " : s
+    }
+}
+
+// MARK: - Invisible NSView that captures key events when recording
+
+private struct RecorderEventCatcher: NSViewRepresentable {
+    @Binding var isRecording: Bool
+    let onCommit: (Shortcut) -> Void
+    let onCancel: () -> Void
+
+    func makeNSView(context: Context) -> RecorderCatcherView {
+        let v = RecorderCatcherView()
+        v.handler = context.coordinator
         return v
     }
 
-    func updateNSView(_ nsView: RecorderField, context: Context) {
-        nsView.coordinator = context.coordinator
+    func updateNSView(_ nsView: RecorderCatcherView, context: Context) {
+        nsView.handler = context.coordinator
+        nsView.isRecording = isRecording
 
-        if isRecording {
-            if nsView.isRecording == false {
-                nsView.beginRecording()
-            }
-            nsView.stringValue = current.displayString
-        } else {
-            if nsView.isRecording == true {
-                nsView.endRecording(cancel: true)
-            } else {
-                nsView.stringValue = current.displayString
+        if isRecording, nsView.window?.firstResponder !== nsView {
+            DispatchQueue.main.async { [weak nsView] in
+                _ = nsView?.window?.makeFirstResponder(nsView)
             }
         }
     }
 
-    final class Coordinator: NSObject {
-        var parent: ShortcutRecorderRepresentable
-        init(_ parent: ShortcutRecorderRepresentable) { self.parent = parent }
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-        func commit(_ new: Shortcut) { parent.onCommit(new) }
-        func cancel() { parent.onCancel() }
-        func liveUpdate(_ s: Shortcut) { parent.onLiveUpdate(s) }
+    final class Coordinator: NSObject, RecorderCatcherHandling {
+        let parent: RecorderEventCatcher
+        init(_ parent: RecorderEventCatcher) { self.parent = parent }
+
+        func didCancel() { parent.onCancel() }
+
+        func didCommit(keyCode: UInt16, flags: NSEvent.ModifierFlags) {
+            let shortcut = Shortcut(keyCode: UInt32(keyCode), modifiers: flags)
+            parent.onCommit(shortcut)
+        }
     }
 }
 
-// MARK: - AppKit field
+private protocol RecorderCatcherHandling: AnyObject {
+    func didCancel()
+    func didCommit(keyCode: UInt16, flags: NSEvent.ModifierFlags)
+}
 
-final class RecorderField: NSTextField {
-    weak var coordinator: ShortcutRecorderRepresentable.Coordinator?
+private final class RecorderCatcherView: NSView {
+    weak var handler: RecorderCatcherHandling?
+    var isRecording = false
 
-    fileprivate(set) var isRecording = false
-    private var localMonitor: Any?
+    override var acceptsFirstResponder: Bool { true }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        isEditable = false
-        isSelectable = false
-        isBezeled = true
-        isBordered = true
-        drawsBackground = true
-        backgroundColor = NSColor.textBackgroundColor
-        alignment = .center
-        font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        focusRingType = .default
-        lineBreakMode = .byTruncatingMiddle
-        setContentHuggingPriority(.required, for: .horizontal)
-        setContentCompressionResistancePriority(.required, for: .horizontal)
-        wantsLayer = true
-        layer?.cornerRadius = 5
-        placeholderString = "Press keys…"
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func beginRecording() {
-        guard !isRecording else { return }
-        isRecording = true
-        stringValue = ""
-        installClickOutsideMonitor()
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            _ = self.window?.makeFirstResponder(self)
-        }
-    }
-
-    func endRecording(cancel: Bool) {
+    override func keyDown(with event: NSEvent) {
         guard isRecording else { return }
-        isRecording = false
-        removeClickOutsideMonitor()
-        if cancel {
-            coordinator?.cancel()
+        // Esc cancels
+        if event.keyCode == 53 {
+            handler?.didCancel()
+            return
         }
-        DispatchQueue.main.async { [weak self] in
-            _ = self?.window?.makeFirstResponder(nil)
+        // Always commit on any key while recording; allow duplicates
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift, .capsLock, .function])
+        handler?.didCommit(keyCode: event.keyCode, flags: flags)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if isRecording {
+            handler?.didCancel()
+        } else {
+            super.mouseDown(with: event)
         }
     }
 
@@ -178,69 +317,17 @@ final class RecorderField: NSTextField {
             }
         }
     }
+}
 
-    override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool { true }
+private extension Color {
+    init(nsColor: NSColor) { self.init(nsColor) }
+}
 
-    override func keyDown(with event: NSEvent) {
-        guard isRecording else {
-            super.keyDown(with: event)
-            return
-        }
-
-        if event.keyCode == 53 {
-            endRecording(cancel: true)
-            return
-        }
-
-        let keyCode = UInt32(event.keyCode)
-        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift, .capsLock, .function])
-
-        let shortcut = Shortcut(keyCode: keyCode, modifiers: mods)
-        coordinator?.commit(shortcut)
-
-        endRecording(cancel: false)
-    }
-
-    override func flagsChanged(with event: NSEvent) {
-        guard isRecording else { return }
-        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift, .capsLock, .function])
-        var parts: [String] = []
-        if mods.contains(.control) { parts.append("⌃") }
-        if mods.contains(.option)  { parts.append("⌥") }
-        if mods.contains(.shift)   { parts.append("⇧") }
-        if mods.contains(.command) { parts.append("⌘") }
-        if mods.contains(.function){ parts.append("fn") }
-
-        stringValue = parts.joined(separator: "") + " "
-        coordinator?.liveUpdate(Shortcut(keyCode: 0, modifiers: mods))
-    }
-
-    override func resignFirstResponder() -> Bool {
-        if isRecording {
-            endRecording(cancel: true)
-        }
-        return super.resignFirstResponder()
-    }
-
-    private func installClickOutsideMonitor() {
-        removeClickOutsideMonitor()
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let self, let window = self.window else { return event }
-            let locationInWindow = event.locationInWindow
-            let locationInView = self.convert(locationInWindow, from: nil)
-            let inside = self.bounds.insetBy(dx: -8, dy: -8).contains(locationInView)
-            if !inside {
-                self.endRecording(cancel: true)
-            }
-            return event
-        }
-    }
-
-    private func removeClickOutsideMonitor() {
-        if let monitor = localMonitor {
-            NSEvent.removeMonitor(monitor)
-            localMonitor = nil
-        }
-    }
+private extension Notification.Name {
+    static let switcherooBeginShortcutRecording = Notification.Name("SwitcherooBeginShortcutRecording")
+    static let switcherooEndShortcutRecording   = Notification.Name("SwitcherooEndShortcutRecording")
+    static let switcherooSuspendHotkeys         = Notification.Name("SwitcherooSuspendHotkeys")
+    static let switcherooResumeHotkeys          = Notification.Name("SwitcherooResumeHotkeys")
+    static let switcherooCancelOtherPicker      = Notification.Name("SwitcherooCancelOtherPicker")
+    static let switcherooShortcutCommitted      = Notification.Name("SwitcherooShortcutCommitted")
 }

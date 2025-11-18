@@ -20,6 +20,10 @@ final class HotKeyManager {
     private var callbacks: [UInt32: (HotKeyEvent) -> Void] = [:]        // id -> callback
     private var handlerRef: EventHandlerRef?
 
+    // New: consult this before delivering callbacks
+    // Return false to suppress delivery.
+    var shouldDeliverCallback: (() -> Bool)?
+
     // Public: register or replace a hotkey for a given id
     func register(id: UInt32, shortcut: Shortcut, callback: @escaping (HotKeyEvent) -> Void) {
         // Unregister any existing hotkey with same id
@@ -90,6 +94,11 @@ final class HotKeyManager {
     private let hotKeyHandler: EventHandlerUPP = { (_: EventHandlerCallRef?, event: EventRef?, userData: UnsafeMutableRawPointer?) -> OSStatus in
         guard let userData, let event else { return noErr }
         let me = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
+
+        // Suppress delivery if requested
+        if let should = me.shouldDeliverCallback, should() == false {
+            return noErr
+        }
 
         var hotKeyID = EventHotKeyID()
         let status = GetEventParameter(event,
