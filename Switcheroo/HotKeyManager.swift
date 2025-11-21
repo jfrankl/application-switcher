@@ -1,6 +1,8 @@
 import Cocoa
 import Carbon
 
+/// Carbon-based global hotkey manager supporting multiple IDs and callbacks.
+/// Exposes a suppression hook (`shouldDeliverCallback`) used while recording shortcuts.
 enum HotKeyEvent {
     case pressed
     case released
@@ -20,8 +22,7 @@ final class HotKeyManager {
     private var callbacks: [UInt32: (HotKeyEvent) -> Void] = [:]        // id -> callback
     private var handlerRef: EventHandlerRef?
 
-    // New: consult this before delivering callbacks
-    // Return false to suppress delivery.
+    // Consult this before delivering callbacks. Return false to suppress delivery.
     var shouldDeliverCallback: (() -> Bool)?
 
     // Public: register or replace a hotkey for a given id

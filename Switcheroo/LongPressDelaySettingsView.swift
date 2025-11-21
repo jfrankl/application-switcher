@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Slider + stepper to control long-press delay, with live persistence via Switcher.
 struct LongPressDelaySettingsView: View {
     @EnvironmentObject private var switcher: Switcher
     @State private var tempDelay: Double = 0

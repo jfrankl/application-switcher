@@ -1,12 +1,12 @@
 import SwiftUI
 
+/// Behavior configuration section: toggles and long-press delay.
 struct BehaviorSection: View {
     @EnvironmentObject private var switcher: Switcher
     @State private var separateMode: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Checkbox-style settings (checkbox on the left; clicking text toggles)
             VStack(alignment: .leading, spacing: 10) {
                 NumberBadgesSettingsView_Checkbox()
                 AutoSelectSingleResultSettingsView_Checkbox()
@@ -15,9 +15,7 @@ struct BehaviorSection: View {
                     .onChange(of: separateMode) { _, new in
                         switcher.setSeparateKeySwitchEnabled(new)
                     }
-
             }
-            // Keep grid only for key-value style rows
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
                 if !switcher.separateKeySwitchEnabled {
                     GridRow {

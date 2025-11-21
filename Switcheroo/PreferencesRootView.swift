@@ -1,5 +1,7 @@
 import SwiftUI
 
+/// Root preferences window content.
+/// Composes sections and applies consistent sizing.
 struct PreferencesRootView: View {
     var body: some View {
         VStack(spacing: 0) {
@@ -13,7 +15,6 @@ struct PreferencesRootView: View {
                     SectionHeader("Behavior")
                     BehaviorSection()
 
-                    // Divider between Behavior and Shortcuts sections
                     Divider().opacity(0.25).padding(.vertical, 6)
 
                     SectionHeader("Shortcuts")

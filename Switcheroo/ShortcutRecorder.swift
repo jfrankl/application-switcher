@@ -189,7 +189,7 @@ struct ShortcutPicker: View, ShortcutPickerHandle {
         snapshotBeforeRecording = shortcut
         isRecording = true
         focused = true
-        coordinator.begin(for: self)
+        RecordingCoordinator.shared.begin(for: self)
     }
 
     private func endRecording() {
@@ -197,8 +197,7 @@ struct ShortcutPicker: View, ShortcutPickerHandle {
         isRecording = false
         focused = false
         liveModifiers = []
-        // Ensure end notification is posted immediately
-        coordinator.end(for: self)
+        RecordingCoordinator.shared.end(for: self)
     }
 
     // MARK: - Styling
@@ -232,7 +231,7 @@ struct ShortcutPicker: View, ShortcutPickerHandle {
 
     private func displayText() -> String {
         if isRecording { return "•••" }
-        if isNone(shortcut) { return " " } // blank display for no shortcut
+        if isNone(shortcut) { return " " }
         let s = shortcut.displayString.trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? " " : s
     }

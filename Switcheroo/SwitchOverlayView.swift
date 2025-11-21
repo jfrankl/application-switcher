@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 
+/// The overlay view that displays candidate applications, selection, and optional search text.
 struct SwitchOverlayView: View {
     let candidates: [NSRunningApplication]
     let selectedIndex: Int?
@@ -14,36 +15,23 @@ struct SwitchOverlayView: View {
 
     var body: some View {
         ZStack {
-            debugBackdrop
+            backdrop
             frostedBackground
-            VStack(spacing: 12) {
-                if !searchText.isEmpty {
-                    searchBadge
-                        .transition(.opacity .combined(with: .move(edge: .top)))
-                }
-
-                if candidates.isEmpty {
-                    emptyStateView
-                        .transition(.opacity)
-                } else {
-                    itemsScrollView
-                }
-            }
-            .padding(.top, 8)
-            .padding(.bottom, 6)
-            .padding(.horizontal, 8)
+            content
         }
         .padding(20)
         .fixedSize(horizontal: false, vertical: true)
         .animation(.easeInOut(duration: 0.12), value: searchText)
         .animation(.easeInOut(duration: 0.12), value: showNumberBadges)
         .animation(.easeInOut(duration: 0.12), value: candidates.count)
+        .accessibilityElement(children: .contain)
     }
 
     // MARK: - Components
 
-    private var debugBackdrop: some View {
+    private var backdrop: some View {
         Color.black.opacity(0.25)
+            .accessibilityHidden(true)
     }
 
     private var frostedBackground: some View {
@@ -53,6 +41,26 @@ struct SwitchOverlayView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .strokeBorder(.white.opacity(0.12), lineWidth: 1)
             )
+            .accessibilityHidden(true)
+    }
+
+    private var content: some View {
+        VStack(spacing: 12) {
+            if !searchText.isEmpty {
+                searchBadge
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if candidates.isEmpty {
+                emptyStateView
+                    .transition(.opacity)
+            } else {
+                itemsScrollView
+            }
+        }
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .padding(.horizontal, 8)
     }
 
     private var searchBadge: some View {
@@ -64,6 +72,7 @@ struct SwitchOverlayView: View {
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .textCase(.none)
                 .foregroundStyle(.primary)
+                .accessibilityLabel("Search: \(searchText)")
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
@@ -78,9 +87,7 @@ struct SwitchOverlayView: View {
             HStack(spacing: 14) {
                 ForEach(Array(candidates.enumerated()), id: \.1.processIdentifier) { (idx, app) in
                     itemView(app: app, index: idx, isSelected: idx == selectedIndex)
-                        .onTapGesture {
-                            onSelect(app)
-                        }
+                        .onTapGesture { onSelect(app) }
                 }
             }
             .padding(16)
@@ -96,6 +103,7 @@ struct SwitchOverlayView: View {
                 .symbolRenderingMode(.hierarchical)
                 .font(.system(size: 56, weight: .regular))
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
 
             Text("No applications found")
                 .font(.system(size: 14, weight: .semibold))
@@ -110,6 +118,7 @@ struct SwitchOverlayView: View {
         .padding(.vertical, 24)
         .padding(.horizontal, 12)
         .frame(minHeight: 120)
+        .accessibilityLabel(emptyStateMessage)
     }
 
     private var emptyStateMessage: String {
@@ -128,6 +137,7 @@ struct SwitchOverlayView: View {
                 if showNumberBadges && index < 10 {
                     numberBadge(number: index == 9 ? "0" : "\(index + 1)")
                         .offset(x: -6, y: -6)
+                        .accessibilityHidden(true)
                 }
             }
             nameView(app: app, isSelected: isSelected)
@@ -140,6 +150,8 @@ struct SwitchOverlayView: View {
                 .fill(isSelected ? Color.white.opacity(0.12) : Color.clear)
         )
         .animation(.easeInOut(duration: 0.15), value: isSelected)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel(for: app, index: index, isSelected: isSelected))
     }
 
     @ViewBuilder
@@ -153,6 +165,7 @@ struct SwitchOverlayView: View {
                 }
             }
             .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 3)
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -181,5 +194,11 @@ struct SwitchOverlayView: View {
                     )
             )
     }
-}
 
+    private func accessibilityLabel(for app: NSRunningApplication, index: Int, isSelected: Bool) -> String {
+        let name = app.localizedName ?? app.bundleIdentifier ?? "App"
+        let prefix = isSelected ? "Selected" : "Item"
+        let badge = showNumberBadges && index < 10 ? ", shortcut \(index == 9 ? "0" : "\(index + 1)")" : ""
+        return "\(prefix): \(name)\(badge)"
+    }
+}

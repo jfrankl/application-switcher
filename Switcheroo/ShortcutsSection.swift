@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Displays and binds all shortcut pickers to Switcher.
 struct ShortcutsSection: View {
     @EnvironmentObject private var switcher: Switcher
     @State private var appSwitch = Shortcut.load()

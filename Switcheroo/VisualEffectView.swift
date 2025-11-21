@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 
+/// SwiftUI wrapper for NSVisualEffectView to get macOS materials in SwiftUI layouts.
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blendingMode: NSVisualEffectView.BlendingMode
@@ -16,21 +17,21 @@ struct VisualEffectView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
+        configure(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        configure(nsView)
+    }
+
+    /// Centralized configuration to keep make/update in sync.
+    private func configure(_ view: NSVisualEffectView) {
         view.state = .active
         view.material = material
         view.blendingMode = blendingMode
         if #available(macOS 11.0, *) {
             view.isEmphasized = emphasized
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.state = .active
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-        if #available(macOS 11.0, *) {
-            nsView.isEmphasized = emphasized
         }
     }
 }

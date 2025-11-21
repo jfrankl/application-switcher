@@ -1,5 +1,7 @@
 import AppKit
 
+/// Controls whether the app shows a Dock icon by switching activation policy.
+/// Persists the preference in UserDefaults.
 final class DockIconManager {
     static let shared = DockIconManager()
     private init() {}

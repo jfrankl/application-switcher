@@ -25,6 +25,8 @@ private struct ToastView: View {
     }
 }
 
+/// A controller for the non-activating overlay panel and ephemeral toast panel.
+/// Keeps window/panel setup concerns out of the core Switcher logic.
 final class OverlayWindowController {
     private var window: NSWindow?
     private var hosting: NSHostingView<SwitchOverlayView>?
@@ -59,7 +61,6 @@ final class OverlayWindowController {
         window?.isReleasedWhenClosed = false
 
         update(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges)
-
         centerOnActiveScreen()
 
         window?.miniwindowTitle = ""
@@ -73,6 +74,7 @@ final class OverlayWindowController {
             window?.orderFrontRegardless()
         }
 
+        // Nudge level to ensure front-most ordering without stealing activation
         if let win = window {
             let currentLevel = win.level
             win.level = NSWindow.Level(rawValue: currentLevel.rawValue + 1)
@@ -82,9 +84,13 @@ final class OverlayWindowController {
 
     func update(candidates: [NSRunningApplication], selectedIndex: Int?, searchText: String, showNumberBadges: Bool) {
         guard let hosting else { return }
-        let view = SwitchOverlayView(candidates: candidates, selectedIndex: selectedIndex, searchText: searchText, showNumberBadges: showNumberBadges, onSelect: { [weak self] app in
-            self?.onSelect?(app)
-        })
+        let view = SwitchOverlayView(
+            candidates: candidates,
+            selectedIndex: selectedIndex,
+            searchText: searchText,
+            showNumberBadges: showNumberBadges,
+            onSelect: { [weak self] app in self?.onSelect?(app) }
+        )
         hosting.rootView = view
         centerOnActiveScreen()
     }
@@ -94,15 +100,10 @@ final class OverlayWindowController {
             createToastWindow()
         }
 
-        // Replace content
-        if let toastHosting {
-            toastHosting.rootView = ToastView(text: text)
-        }
+        toastHosting?.rootView = ToastView(text: text)
 
-        // Position bottom center of active screen
         positionToast()
 
-        // Show
         if let panel = toastWindow as? NSPanel {
             panel.orderFrontRegardless()
         } else {
@@ -110,7 +111,6 @@ final class OverlayWindowController {
         }
         toastWindow?.alphaValue = 1.0
 
-        // Schedule hide
         toastHideWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.hideToast(animated: true)
@@ -157,6 +157,8 @@ final class OverlayWindowController {
         hideToast(animated: false)
     }
 
+    // MARK: - Window Setup
+
     private func createWindow() {
         let content = SwitchOverlayView(candidates: [], selectedIndex: nil, searchText: "", showNumberBadges: true, onSelect: { _ in })
         let hosting = NSHostingView(rootView: content)
@@ -190,7 +192,6 @@ final class OverlayWindowController {
         win.contentView?.wantsLayer = true
         win.contentView?.addSubview(hosting)
 
-        // Create a max-width constraint we can update per screen size
         let maxWidthConstraint = hosting.widthAnchor.constraint(lessThanOrEqualToConstant: 980)
         NSLayoutConstraint.activate([
             hosting.centerXAnchor.constraint(equalTo: win.contentView!.centerXAnchor),
@@ -255,12 +256,10 @@ final class OverlayWindowController {
 
         // Compute the desired max width: visible frame minus 23px margins on each side.
         let visible = screen.visibleFrame
-        let maxWidth = max(320, visible.width - 46) // keep a sensible lower bound
+        let maxWidth = max(320, visible.width - 46)
 
         // Update the hosting width constraint to reflect current screen
-        if let maxWidthConstraint = hostingMaxWidthConstraint {
-            maxWidthConstraint.constant = maxWidth
-        }
+        hostingMaxWidthConstraint?.constant = maxWidth
 
         let targetSize: NSSize
         if let hosting = hosting {

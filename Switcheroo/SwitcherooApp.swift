@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 
+/// App entry point. Creates and injects the Switcher and status bar item.
 @main
 struct SwitcherooApp: App {
     @StateObject private var switcher = Switcher()

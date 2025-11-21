@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Toggle to show/hide number badges on overlay items.
 struct NumberBadgesSettingsView_Checkbox: View {
     @EnvironmentObject private var switcher: Switcher
     var body: some View {

@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 
+/// A global-hotkey-like shortcut (keyCode + modifiers) with Codable persistence and display helpers.
 struct Shortcut: Codable, Equatable {
     var keyCode: UInt32      // Carbon/Quartz virtual key code
     var modifiers: NSEvent.ModifierFlags
@@ -47,7 +48,7 @@ struct Shortcut: Codable, Equatable {
         return parts.joined()
     }
 
-    // Default shortcut (your previous F12)
+    // Default shortcut (F12)
     static let `default` = Shortcut(keyCode: 111, modifiers: []) // F12
 
     // MARK: - Persistence

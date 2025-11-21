@@ -3,24 +3,11 @@ import AppKit
 import UserNotifications
 import Combine
 
+/// Coordinates hotkeys, overlay interactions, MRU tracking, and window cycling.
+/// This class intentionally keeps side effects isolated behind helper methods to aid testing.
 final class Switcher: ObservableObject {
-    init() {
-        self.longPressThreshold = Self.loadPersistedLongPressDelay()
-        self.showNumberBadges = UserDefaults.standard.object(forKey: Self.numberBadgesDefaultsKey) as? Bool ?? true
-        self.autoSelectSingleResult = UserDefaults.standard.object(forKey: Self.autoSelectDefaultsKey) as? Bool ?? true
-        self.windowCycleShortcut = Self.loadWindowCycleShortcut()
-        self.overlaySelectShortcut = Self.loadOverlaySelectShortcut()
-        self.overlayQuitShortcut = Self.loadOverlayQuitShortcut()
 
-        self.separateKeySwitchEnabled = UserDefaults.standard.object(forKey: Self.separateModeDefaultsKey) as? Bool ?? false
-        self.separateToggleShortcut = Self.loadSeparateToggleShortcut()
-        self.separateOverlayShortcut = Self.loadSeparateOverlayShortcut()
-
-        HotKeyManager.shared.shouldDeliverCallback = { [weak self] in
-            guard let self else { return true }
-            return !self.hotkeysSuspended
-        }
-    }
+    // MARK: - Published Settings
 
     @Published var backgroundColor: Color = Color(NSColor.windowBackgroundColor)
 
@@ -42,68 +29,44 @@ final class Switcher: ObservableObject {
 
     @Published private(set) var hotkeysSuspended: Bool = false
 
+    // MARK: - Shortcuts
+
     private static let separateToggleDefaultsKey = "SeparateToggleShortcut"
     private static let separateOverlayDefaultsKey = "SeparateOverlayShortcut"
 
-    private static func loadSeparateToggleShortcut() -> Shortcut {
-        if let data = UserDefaults.standard.data(forKey: separateToggleDefaultsKey),
-           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
-            return s
-        }
-        return Shortcut(keyCode: 111, modifiers: []) // F12
-    }
-
-    private static func saveSeparateToggleShortcut(_ s: Shortcut) {
-        if let data = try? JSONEncoder().encode(s) {
-            UserDefaults.standard.set(data, forKey: separateToggleDefaultsKey)
-        }
-    }
-
-    private static func loadSeparateOverlayShortcut() -> Shortcut {
-        if let data = UserDefaults.standard.data(forKey: separateOverlayDefaultsKey),
-           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
-            return s
-        }
-        return Shortcut(keyCode: 103, modifiers: []) // F11
-    }
-
-    private static func saveSeparateOverlayShortcut(_ s: Shortcut) {
-        if let data = try? JSONEncoder().encode(s) {
-            UserDefaults.standard.set(data, forKey: separateOverlayDefaultsKey)
-        }
-    }
-
-    private var pressStart: Date?
-    private var longPressTimer: DispatchSourceTimer?
-    private var actionConsumedForThisPress = false
-
-    private var activationObserver: Any?
-    private var mru: [NSRunningApplication] = []
-
-    private let overlay = OverlayWindowController()
-
-    private var shortcut: Shortcut = .default
-
     @Published private(set) var windowCycleShortcut: Shortcut
-
     @Published private(set) var overlaySelectShortcut: Shortcut
     @Published private(set) var overlayQuitShortcut: Shortcut
+
+    private static let windowCycleDefaultsKey = "WindowCycleShortcut"
+
+    private static let overlaySelectDefaultsKey = "OverlaySelectShortcut"
+    private static let overlayQuitDefaultsKey = "OverlayQuitShortcut"
+
+    private static var defaultOverlaySelect: Shortcut { Shortcut(keyCode: 36, modifiers: []) }
+    private static var defaultOverlayQuit: Shortcut { Shortcut(keyCode: 12, modifiers: [.command]) }
+
+    // MARK: - Overlay State
+
+    private let overlay = OverlayWindowController()
 
     private var overlaySearchText: String = ""
     private var overlayFiltered: [NSRunningApplication] = []
     private var overlaySelectedIndex: Int? = nil
     private var overlayEventMonitor: Any?
     private var overlayGlobalEventMonitor: Any?
-
     private var overlayOriginApp: NSRunningApplication?
-
     private var overlayActivationObserver: Any?
 
+    // MARK: - MRU and Window Cycling
+
+    private var mru: [NSRunningApplication] = []
     private var windowCycleStackByPID: [pid_t: [AppWindow]] = [:]
     private var windowCycleIndexByPID: [pid_t: Int] = [:]
-
     private var windowCycleLastStableIDByPID: [pid_t: Int] = [:]
     private var windowCycleLastIndexByPID: [pid_t: Int] = [:]
+
+    // MARK: - Hotkey / Press State
 
     private enum HotKeyID: UInt32 {
         case appSwitch = 1
@@ -112,16 +75,49 @@ final class Switcher: ObservableObject {
         case separateOverlay = 4
     }
 
+    private var shortcut: Shortcut = .default
+    private var pressStart: Date?
+    private var longPressTimer: DispatchSourceTimer?
+    private var actionConsumedForThisPress = false
+
+    private var activationObserver: Any?
+
+    // MARK: - Init
+
+    init() {
+        self.longPressThreshold = Self.loadPersistedLongPressDelay()
+        self.showNumberBadges = UserDefaults.standard.object(forKey: Self.numberBadgesDefaultsKey) as? Bool ?? true
+        self.autoSelectSingleResult = UserDefaults.standard.object(forKey: Self.autoSelectDefaultsKey) as? Bool ?? true
+        self.windowCycleShortcut = Self.loadWindowCycleShortcut()
+        self.overlaySelectShortcut = Self.loadOverlaySelectShortcut()
+        self.overlayQuitShortcut = Self.loadOverlayQuitShortcut()
+
+        self.separateKeySwitchEnabled = UserDefaults.standard.object(forKey: Self.separateModeDefaultsKey) as? Bool ?? false
+        self.separateToggleShortcut = Self.loadSeparateToggleShortcut()
+        self.separateOverlayShortcut = Self.loadSeparateOverlayShortcut()
+
+        HotKeyManager.shared.shouldDeliverCallback = { [weak self] in
+            guard let self else { return true }
+            return !self.hotkeysSuspended
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - Lifecycle
+
     func start() {
         requestNotificationAuthorization()
-
         shortcut = Shortcut.load()
-
         registerAllHotkeysForCurrentMode()
 
+        // Ensure overlay shortcuts are persisted
         Self.saveOverlaySelectShortcut(overlaySelectShortcut)
         Self.saveOverlayQuitShortcut(overlayQuitShortcut)
 
+        // Track activation to update MRU and reset window cycling stacks
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -133,19 +129,18 @@ final class Switcher: ObservableObject {
             self.resetWindowCycleStacks(exceptPID: app.processIdentifier)
         }
 
+        // Hotkey suspension controls
         NotificationCenter.default.addObserver(self, selector: #selector(onSuspendHotkeys), name: Notification.Name("SwitcherooSuspendHotkeys"), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(onResumeHotkeys), name: Notification.Name("SwitcherooResumeHotkeys"), object: nil)
 
-        // New: fully disable global hotkeys while any picker is recording so the keystroke reaches the field
+        // Disable global hotkeys while any shortcut picker is recording
         NotificationCenter.default.addObserver(self, selector: #selector(beginShortcutRecording), name: Notification.Name("SwitcherooBeginShortcutRecording"), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(endShortcutRecording), name: Notification.Name("SwitcherooEndShortcutRecording"), object: nil)
 
         seedMRU()
     }
 
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-    }
+    // MARK: - Recording Suspension
 
     @objc private func beginShortcutRecording() {
         hotkeysSuspended = true
@@ -157,23 +152,20 @@ final class Switcher: ObservableObject {
         registerAllHotkeysForCurrentMode()
     }
 
-    // Only allow callbacks from hotkeys that are active for the current mode.
+    // MARK: - Hotkey Routing
+
     private func isHotKeyActive(id: UInt32) -> Bool {
         guard let hk = HotKeyID(rawValue: id) else { return false }
         switch hk {
         case .windowCycle:
-            // Always active
             return true
         case .appSwitch:
-            // Only in combined mode
             return !separateKeySwitchEnabled
         case .separateToggle, .separateOverlay:
-            // Only in separate mode
             return separateKeySwitchEnabled
         }
     }
 
-    // Centralized registration so duplicates are preserved and only active IDs act
     private func registerAllHotkeysForCurrentMode() {
         HotKeyManager.shared.unregisterAll()
 
@@ -198,12 +190,9 @@ final class Switcher: ObservableObject {
 
         HotKeyManager.shared.register(id: HotKeyID.windowCycle.rawValue, shortcut: windowCycleShortcut) { [weak self] event in
             guard let self, self.isHotKeyActive(id: HotKeyID.windowCycle.rawValue) else { return }
-            switch event {
-            case .pressed:
+            if case .pressed = event {
                 self.postWindowCycleNotification()
                 self.togglePreviousWindowInFrontmostApp()
-            case .released:
-                break
             }
         }
     }
@@ -220,10 +209,6 @@ final class Switcher: ObservableObject {
         guard enabled != separateKeySwitchEnabled else { return }
         separateKeySwitchEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: Self.separateModeDefaultsKey)
-        registerAllHotkeysForCurrentMode()
-    }
-
-    private func registerSeparateModeHotkeys() {
         registerAllHotkeysForCurrentMode()
     }
 
@@ -290,7 +275,7 @@ final class Switcher: ObservableObject {
         return max(0.05, min(5.0, v))
     }
 
-    private static let windowCycleDefaultsKey = "WindowCycleShortcut"
+    // MARK: - Persisted shortcuts
 
     private static func loadWindowCycleShortcut() -> Shortcut {
         if let data = UserDefaults.standard.data(forKey: windowCycleDefaultsKey),
@@ -305,12 +290,6 @@ final class Switcher: ObservableObject {
             UserDefaults.standard.set(data, forKey: windowCycleDefaultsKey)
         }
     }
-
-    private static let overlaySelectDefaultsKey = "OverlaySelectShortcut"
-    private static let overlayQuitDefaultsKey = "OverlayQuitShortcut"
-
-    private static var defaultOverlaySelect: Shortcut { Shortcut(keyCode: 36, modifiers: []) }
-    private static var defaultOverlayQuit: Shortcut { Shortcut(keyCode: 12, modifiers: [.command]) }
 
     private static func loadOverlaySelectShortcut() -> Shortcut {
         if let data = UserDefaults.standard.data(forKey: overlaySelectDefaultsKey),
@@ -334,37 +313,48 @@ final class Switcher: ObservableObject {
         return defaultOverlayQuit
     }
 
-    private static func saveOverlayQuitShortcut(_ s: Shortcut) -> Void {
+    private static func saveOverlayQuitShortcut(_ s: Shortcut) {
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: overlayQuitDefaultsKey)
         }
     }
 
-    private func overlayIsVisible() -> Bool {
-        overlayEventMonitor != nil || overlayGlobalEventMonitor != nil
+    // Added: missing helpers for separate mode shortcuts
+    private static func loadSeparateToggleShortcut() -> Shortcut {
+        if let data = UserDefaults.standard.data(forKey: separateToggleDefaultsKey),
+           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
+            return s
+        }
+        return Shortcut(keyCode: 111, modifiers: []) // F12
+    }
+
+    private static func saveSeparateToggleShortcut(_ s: Shortcut) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: separateToggleDefaultsKey)
+        }
+    }
+
+    private static func loadSeparateOverlayShortcut() -> Shortcut {
+        if let data = UserDefaults.standard.data(forKey: separateOverlayDefaultsKey),
+           let s = try? JSONDecoder().decode(Shortcut.self, from: data) {
+            return s
+        }
+        return Shortcut(keyCode: 103, modifiers: []) // F11
+    }
+
+    private static func saveSeparateOverlayShortcut(_ s: Shortcut) {
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: separateOverlayDefaultsKey)
+        }
     }
 
     // MARK: - Combined mode (press/hold)
 
     private func onHotkeyPressed() {
         guard !separateKeySwitchEnabled else { return }
-        if overlayIsVisible() {
-            actionConsumedForThisPress = false
-            pressStart = Date()
 
-            cancelLongPressTimer()
-            let t = DispatchSource.makeTimerSource(queue: .main)
-            t.schedule(deadline: .now() + longPressThreshold)
-            t.setEventHandler { [weak self] in
-                guard let self else { return }
-                self.cancelLongPressTimer()
-                if self.actionConsumedForThisPress == false {
-                    self.hideOverlayAndCleanup(reactivateOrigin: true)
-                    self.actionConsumedForThisPress = true
-                }
-            }
-            t.resume()
-            longPressTimer = t
+        if overlayIsVisible() {
+            beginPressCycleWhileOverlayVisible()
             return
         }
 
@@ -372,6 +362,24 @@ final class Switcher: ObservableObject {
         pressStart = Date()
         cancelLongPressTimer()
         scheduleLongPressTimer()
+    }
+
+    private func beginPressCycleWhileOverlayVisible() {
+        actionConsumedForThisPress = false
+        pressStart = Date()
+        cancelLongPressTimer()
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + longPressThreshold)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.cancelLongPressTimer()
+            if self.actionConsumedForThisPress == false {
+                self.hideOverlayAndCleanup(reactivateOrigin: true)
+                self.actionConsumedForThisPress = true
+            }
+        }
+        t.resume()
+        longPressTimer = t
     }
 
     private func scheduleLongPressTimer() {
@@ -437,6 +445,12 @@ final class Switcher: ObservableObject {
         }
     }
 
+    // MARK: - Overlay Management
+
+    private func overlayIsVisible() -> Bool {
+        overlayEventMonitor != nil || overlayGlobalEventMonitor != nil
+    }
+
     private func hideOverlayAndCleanup(reactivateOrigin: Bool) {
         overlay.hide(animated: true)
         removeOverlayEventMonitor()
@@ -447,23 +461,9 @@ final class Switcher: ObservableObject {
         overlayOriginApp = nil
     }
 
-    private func restorePreviousApp() {
-        postDebugNotification()
-        pruneMRU()
-        guard !mru.isEmpty else {
-            NSLog("MRU empty; nothing to activate.")
-            hideOverlayAndCleanup(reactivateOrigin: false)
-            return
-        }
-        let targetIndex = (mru.count > 1) ? 1 : 0
-        let target = mru[targetIndex]
-        activateApp(target)
-        hideOverlayAndCleanup(reactivateOrigin: false)
-    }
-
     private func enterOverlayMode() {
         pruneMRU()
-        if mru.isEmpty {
+        guard !mru.isEmpty else {
             hideOverlayAndCleanup(reactivateOrigin: false)
             return
         }
@@ -484,93 +484,15 @@ final class Switcher: ObservableObject {
         installOverlayActivationObserver()
     }
 
-    private func seedMRU() {
-        let running = NSWorkspace.shared.runningApplications
-            .filter { app in
-                app.activationPolicy == .regular &&
-                !app.isHidden &&
-                !app.isTerminated
-            }
-
-        var list: [NSRunningApplication] = []
-        if let front = running.first(where: { $0.isActive }) {
-            list.append(front)
-        }
-        for app in running where !list.contains(where: { $0.processIdentifier == app.processIdentifier }) {
-            list.append(app)
-        }
-        mru = list
-        pruneMRU()
-    }
-
-    private func recordActivation(_ app: NSRunningApplication) {
-        guard app.activationPolicy == .regular else { return }
-        mru.removeAll { $0.processIdentifier == app.processIdentifier }
-        mru.insert(app, at: 0)
-        pruneMRU()
-    }
-
-    private func pruneMRU() {
-        let myPID = ProcessInfo.processInfo.processIdentifier
-        mru = mru.filter { app in
-            app.processIdentifier != myPID &&
-            app.activationPolicy == .regular &&
-            !app.isHidden &&
-            !app.isTerminated
-        }
-    }
-
-    private func activateApp(_ app: NSRunningApplication) {
-        let name = app.localizedName ?? app.bundleIdentifier ?? "App"
-
-        let optionSets: [[NSApplication.ActivationOptions]] = [
-            [.activateAllWindows],
-            []
-        ]
-
-        for opts in optionSets {
-            let ok: Bool
-            if opts.isEmpty {
-                ok = app.activate()
-            } else {
-                ok = app.activate(options: NSApplication.ActivationOptions(opts))
-            }
-            NSLog("Activating \(name) with options \(opts) -> \(ok ? "OK" : "Failed")")
-            if ok { return }
-        }
-
-        if let url = app.bundleURL {
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = true
-            config.createsNewApplicationInstance = false
-            NSWorkspace.shared.openApplication(at: url, configuration: config) { result, error in
-                if result != nil {
-                    NSLog("Reopen \(name) via NSWorkspace -> OK")
-                } else {
-                    NSLog("Reopen \(name) via NSWorkspace -> Failed (\(error?.localizedDescription ?? "unknown"))")
-                    self.axUnhideAndRaise(app)
-                }
-            }
-            return
-        }
-
-        axUnhideAndRaise(app)
-    }
-
-    // MARK: - Overlay typing support
-
     private func installOverlayEventMonitor() {
         removeOverlayEventMonitor()
 
         overlayEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
-            switch event.type {
-            case .keyDown:
-                if self.handleOverlayKeyDown(event) { return nil }
-                return event
-            default:
-                return event
+            if event.type == .keyDown, self.handleOverlayKeyDown(event) {
+                return nil
             }
+            return event
         }
 
         overlayGlobalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
@@ -642,7 +564,7 @@ final class Switcher: ObservableObject {
         if let charsIgnoringMods = event.charactersIgnoringModifiers, charsIgnoringMods.count == 1 {
             let c = charsIgnoringMods.unicodeScalars.first!
             switch c.value {
-            case 0x1B:
+            case 0x1B: // ESC
                 if overlaySearchText.isEmpty {
                     hideOverlayAndCleanup(reactivateOrigin: true)
                 } else {
@@ -650,7 +572,7 @@ final class Switcher: ObservableObject {
                     recomputeOverlayFilterAndUpdate()
                 }
                 return true
-            case 0x7F:
+            case 0x7F: // DELETE
                 if !overlaySearchText.isEmpty {
                     overlaySearchText.removeLast()
                     recomputeOverlayFilterAndUpdate()
@@ -679,6 +601,7 @@ final class Switcher: ObservableObject {
                 if selectByDigit(Character(digit)) { return true }
             }
 
+            // Append printable characters to the search text
             let printableScalars = scalars.filter { scalar in
                 switch scalar.properties.generalCategory {
                 case .control, .format, .surrogate, .privateUse, .unassigned: return false
@@ -702,11 +625,9 @@ final class Switcher: ObservableObject {
         NSLog("Attempting to quit \(name)")
 
         _ = app.terminate()
-
         removeAppFromLists(app)
 
         overlay.showToast("Quit \(name)")
-
         overlay.update(candidates: overlayFiltered, selectedIndex: overlaySelectedIndex, searchText: overlaySearchText, showNumberBadges: showNumberBadges)
     }
 
@@ -751,10 +672,11 @@ final class Switcher: ObservableObject {
     }
 
     private func recomputeOverlayFilterAndUpdate() {
-        if overlaySearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let trimmed = overlaySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
             overlayFiltered = mru
         } else {
-            let needle = overlaySearchText.lowercased()
+            let needle = trimmed.lowercased()
             overlayFiltered = mru.filter { app in
                 let name = (app.localizedName ?? app.bundleIdentifier ?? "").lowercased()
                 return matchesWordPrefix(name: name, query: needle)
@@ -769,6 +691,7 @@ final class Switcher: ObservableObject {
         }
     }
 
+    /// Match query tokens against word prefixes in the app name.
     private func matchesWordPrefix(name: String, query: String) -> Bool {
         let nameWords = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
         let queryTokens = query.split(whereSeparator: { $0.isWhitespace || $0 == "-" || $0 == "_" })
@@ -781,6 +704,94 @@ final class Switcher: ObservableObject {
         return true
     }
 
+    // MARK: - MRU
+
+    private func seedMRU() {
+        let running = NSWorkspace.shared.runningApplications.filter { app in
+            app.activationPolicy == .regular && !app.isHidden && !app.isTerminated
+        }
+
+        var list: [NSRunningApplication] = []
+        if let front = running.first(where: { $0.isActive }) {
+            list.append(front)
+        }
+        for app in running where !list.contains(where: { $0.processIdentifier == app.processIdentifier }) {
+            list.append(app)
+        }
+        mru = list
+        pruneMRU()
+    }
+
+    private func recordActivation(_ app: NSRunningApplication) {
+        guard app.activationPolicy == .regular else { return }
+        mru.removeAll { $0.processIdentifier == app.processIdentifier }
+        mru.insert(app, at: 0)
+        pruneMRU()
+    }
+
+    private func pruneMRU() {
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        mru = mru.filter { app in
+            app.processIdentifier != myPID &&
+            app.activationPolicy == .regular &&
+            !app.isHidden &&
+            !app.isTerminated
+        }
+    }
+
+    // MARK: - App Activation
+
+    private func activateApp(_ app: NSRunningApplication) {
+        let name = app.localizedName ?? app.bundleIdentifier ?? "App"
+
+        let optionSets: [[NSApplication.ActivationOptions]] = [
+            [.activateAllWindows],
+            []
+        ]
+
+        for opts in optionSets {
+            let ok: Bool = opts.isEmpty ? app.activate() : app.activate(options: NSApplication.ActivationOptions(opts))
+            NSLog("Activating \(name) with options \(opts) -> \(ok ? "OK" : "Failed")")
+            if ok { return }
+        }
+
+        if let url = app.bundleURL {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            config.createsNewApplicationInstance = false
+            NSWorkspace.shared.openApplication(at: url, configuration: config) { result, error in
+                if result != nil {
+                    NSLog("Reopen \(name) via NSWorkspace -> OK")
+                } else {
+                    NSLog("Reopen \(name) via NSWorkspace -> Failed (\(error?.localizedDescription ?? "unknown"))")
+                    self.axUnhideAndRaise(app)
+                }
+            }
+            return
+        }
+
+        axUnhideAndRaise(app)
+    }
+
+    private func axUnhideAndRaise(_ app: NSRunningApplication) {
+        _ = app.unhide()
+        _ = app.activate(options: [])
+    }
+
+    private func restorePreviousApp() {
+        postDebugNotification()
+        pruneMRU()
+        guard !mru.isEmpty else {
+            NSLog("MRU empty; nothing to activate.")
+            hideOverlayAndCleanup(reactivateOrigin: false)
+            return
+        }
+        let targetIndex = (mru.count > 1) ? 1 : 0
+        let target = mru[targetIndex]
+        activateApp(target)
+        hideOverlayAndCleanup(reactivateOrigin: false)
+    }
+
     // MARK: - Window cycling (fixed stack per activation, reset on count change)
 
     private func resetWindowCycleStacks(exceptPID pid: pid_t) {
@@ -791,8 +802,7 @@ final class Switcher: ObservableObject {
     }
 
     private func captureWindowStack(for app: NSRunningApplication) -> [AppWindow] {
-        let windows = WindowEnumerator.windows(for: app)
-        return windows
+        WindowEnumerator.windows(for: app)
     }
 
     private func isAXElementValid(_ element: AXUIElement) -> Bool {
@@ -817,11 +827,7 @@ final class Switcher: ObservableObject {
                 return
             }
             windowCycleStackByPID[pid] = liveWindows
-            if liveWindows.count >= 2 {
-                windowCycleIndexByPID[pid] = 0
-            } else {
-                windowCycleIndexByPID[pid] = -1
-            }
+            windowCycleIndexByPID[pid] = liveWindows.count >= 2 ? 0 : -1
             NSLog("[Cycle] (Re)captured \(liveWindows.count) windows for PID \(pid) due to count change or first use.")
         }
 
@@ -893,10 +899,5 @@ final class Switcher: ObservableObject {
         UNUserNotificationCenter.current().add(request) { error in
             if let error { NSLog("Notification failed: \(error.localizedDescription)") }
         }
-    }
-
-    private func axUnhideAndRaise(_ app: NSRunningApplication) {
-        _ = app.unhide()
-        _ = app.activate(options: [])
     }
 }

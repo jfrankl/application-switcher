@@ -1,7 +1,8 @@
 import SwiftUI
 
+/// Displays version/support info, a tip, and a feedback button.
+/// Uses an environment-provided closure to open the App Store page.
 struct OverviewSection: View {
-    // Access the feedback opener from the environment via a closure
     @Environment(\.openFeedback) private var openFeedback
 
     var body: some View {
@@ -24,7 +25,6 @@ struct OverviewSection: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // Move feedback button here, after the tip
             HStack {
                 Button {
                     openFeedback()

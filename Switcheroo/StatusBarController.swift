@@ -1,10 +1,13 @@
 import AppKit
 
+/// Manages the status bar item and its menu.
+/// Keeps menu wiring out of the App entry point.
 final class StatusBarController {
     private var statusItem: NSStatusItem?
 
     func installStatusItem() {
-        if statusItem != nil { return }
+        guard statusItem == nil else { return }
+
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
             if let img = NSImage(systemSymbolName: "lightbulb", accessibilityDescription: "Switcheroo") {
@@ -15,6 +18,14 @@ final class StatusBarController {
             }
             button.toolTip = "Switcheroo"
         }
+
+        item.menu = buildMenu()
+        statusItem = item
+    }
+
+    // MARK: - Menu
+
+    private func buildMenu() -> NSMenu {
         let menu = NSMenu()
 
         let dockItem = NSMenuItem(title: dockMenuTitle(), action: #selector(toggleDockIcon), keyEquivalent: "")
@@ -24,11 +35,11 @@ final class StatusBarController {
 
         menu.addItem(.separator())
 
-        menu.addItem(NSMenuItem(title: "Quit Switcheroo", action: #selector(quitApp), keyEquivalent: "q"))
-        menu.items.last?.target = self
+        let quit = NSMenuItem(title: "Quit Switcheroo", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
 
-        item.menu = menu
-        statusItem = item
+        return menu
     }
 
     @objc private func toggleDockIcon(_ sender: NSMenuItem) {

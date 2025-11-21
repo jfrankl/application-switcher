@@ -1,20 +1,21 @@
 import AppKit
 import ApplicationServices
 
+/// Thin wrapper around AXUIElement to enumerate and activate app windows.
 struct AppWindow {
     let windowNumber: Int
     let axElement: AXUIElement
     let title: String?
 
-    // Stable identity derived from the AXUIElement pointer address.
-    // This remains stable for the lifetime of the AX element.
+    /// Stable identity derived from the AXUIElement pointer address.
+    /// This remains stable for the lifetime of the AX element.
     var stableID: Int {
-        return Unmanaged.passUnretained(axElement).toOpaque().hashValue
+        Unmanaged.passUnretained(axElement).toOpaque().hashValue
     }
 }
 
 enum WindowEnumerator {
-    // Enumerate standard, visible windows for the given app
+    /// Enumerate standard, visible windows for the given app.
     static func windows(for app: NSRunningApplication) -> [AppWindow] {
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
 
@@ -36,37 +37,25 @@ enum WindowEnumerator {
 
         var result: [AppWindow] = []
         for (idx, axWin) in array.enumerated() {
-            // Roles and subroles help distinguish real windows
             let role = getStringAttribute(axWin, kAXRoleAttribute as CFString) ?? "?"
             let subrole = getStringAttribute(axWin, kAXSubroleAttribute as CFString) ?? "?"
             let title = getStringAttribute(axWin, kAXTitleAttribute as CFString)
 
             // Filter to standard windows
-            guard role == (kAXWindowRole as String) else {
-                continue
-            }
+            guard role == (kAXWindowRole as String) else { continue }
 
             // Skip sheets, drawers, popovers
             if !subrole.isEmpty, subrole != (kAXStandardWindowSubrole as String) {
                 continue
             }
 
-            // Minimized?
-            if let minimized = getBoolAttribute(axWin, kAXMinimizedAttribute as CFString), minimized {
-                continue
-            }
+            if let minimized = getBoolAttribute(axWin, kAXMinimizedAttribute as CFString), minimized { continue }
+            if let hidden = getBoolAttribute(axWin, kAXHiddenAttribute as CFString), hidden { continue }
 
-            // Hidden?
-            if let hidden = getBoolAttribute(axWin, kAXHiddenAttribute as CFString), hidden {
-                continue
-            }
-
-            // Try window number via AXWindowNumber
             var number: Int?
             if let n = getIntAttribute(axWin, "AXWindowNumber" as CFString) {
                 number = n
             } else {
-                // Fallback synthetic number using index to keep ordering stable per enumeration
                 number = 1_000_000 + idx
             }
 
@@ -81,9 +70,8 @@ enum WindowEnumerator {
         return result
     }
 
-    // Bring a window to front and focus it
+    /// Bring a window to front and focus it.
     static func activate(window: AppWindow) {
-        // Try AXRaise
         let raiseErr = AXUIElementPerformAction(window.axElement, kAXRaiseAction as CFString)
         if raiseErr != .success {
             NSLog("[AX] AXRaise failed: \(raiseErr.rawValue)")
